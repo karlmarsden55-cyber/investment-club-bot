@@ -98,3 +98,12 @@ client.login(DISCORD_TOKEN).catch(error => {
   console.error('Bot login failed:');
   console.error(error);
 });
+async function fetchJson(url) {
+  const response = await fetch(url);
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  return await response.json();
+}
