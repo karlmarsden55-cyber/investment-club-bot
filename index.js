@@ -5,6 +5,11 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 
+if (!DISCORD_TOKEN) console.error('Missing DISCORD_TOKEN');
+if (!CLIENT_ID) console.error('Missing CLIENT_ID');
+if (!GUILD_ID) console.error('Missing GUILD_ID');
+if (!FINNHUB_API_KEY) console.error('Missing FINNHUB_API_KEY');
+
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
@@ -21,17 +26,22 @@ const commands = [
     )
 ].map(command => command.toJSON());
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
-  const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
+  try {
+    const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
 
-  await rest.put(
-    Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-    { body: commands }
-  );
+    await rest.put(
+      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+      { body: commands }
+    );
 
-  console.log('Slash commands registered');
+    console.log('Slash commands registered');
+  } catch (error) {
+    console.error('Slash command registration failed:');
+    console.error(error);
+  }
 });
 
 client.on('interactionCreate', async interaction => {
@@ -47,11 +57,15 @@ client.on('interactionCreate', async interaction => {
     const profile = await fetchJson(`https://finnhub.io/api/v1/stock/profile2?symbol=${ticker}&token=${FINNHUB_API_KEY}`);
     const recommendation = await fetchJson(`https://finnhub.io/api/v1/stock/recommendation?symbol=${ticker}&token=${FINNHUB_API_KEY}`);
 
-    const currentPrice = quote.c;
     const companyName = profile.name || ticker;
-    const marketCap = profile.marketCapitalization ? `£/$${Number(profile.marketCapitalization).toLocaleString()}m` : 'N/A';
+    const price = quote.c ? quote.c : 'N/A';
+    const marketCap = profile.marketCapitalization
+      ? `$${Number(profile.marketCapitalization).toLocaleString()}m`
+      : 'N/A';
 
-    const analyst = recommendation && recommendation.length > 0 ? recommendation[0] : null;
+    const analyst = Array.isArray(recommendation) && recommendation.length > 0
+      ? recommendation[0]
+      : null;
 
     let analystText = 'No analyst data available';
 
@@ -67,22 +81,20 @@ client.on('interactionCreate', async interaction => {
     const message =
       `🔍 **STOCK SNAPSHOT**\n\n` +
       `**${companyName} (${ticker})**\n\n` +
-      `Current Price: ${currentPrice || 'N/A'}\n` +
+      `Current Price: ${price}\n` +
       `Market Cap: ${marketCap}\n\n` +
       `**Analyst View**\n` +
       analystText;
 
     await interaction.editReply(message);
-
   } catch (error) {
+    console.error('Stock lookup failed:');
     console.error(error);
     await interaction.editReply(`Could not fetch data for ${ticker}.`);
   }
 });
 
-async function fetchJson(url) {
-  const response = await fetch(url);
-  return await response.json();
-}
-
-client.login(DISCORD_TOKEN);
+client.login(DISCORD_TOKEN).catch(error => {
+  console.error('Bot login failed:');
+  console.error(error);
+});
