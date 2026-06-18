@@ -60,6 +60,10 @@ client.on('interactionCreate', async interaction => {
       `https://finnhub.io/api/v1/stock/recommendation?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`
     );
 
+    const metrics = await fetchJson(
+      `https://finnhub.io/api/v1/stock/metric?symbol=${encodeURIComponent(ticker)}&metric=all&token=${encodeURIComponent(FINNHUB_API_KEY)}`
+    );
+
     const currentPrice = quote && quote.c ? quote.c : null;
     const companyName = profile && profile.name ? profile.name : ticker;
     const currency = profile && profile.currency ? profile.currency : '';
@@ -67,20 +71,7 @@ client.on('interactionCreate', async interaction => {
       ? formatMarketCap_(profile.marketCapitalization)
       : 'N/A';
 
-    let performance = {
-      d30: 'N/A',
-      d90: 'N/A',
-      d180: 'N/A',
-      y1: 'N/A'
-    };
-
-    try {
-      const yahooPrices = await fetchYahooPrices_(ticker);
-      performance = calculatePerformance_(yahooPrices, currentPrice);
-    } catch (error) {
-      console.error('Performance lookup failed:');
-      console.error(error);
-    }
+    const performance = buildPerformanceText_(metrics);
 
     const analyst = Array.isArray(recommendation) && recommendation.length > 0
       ? recommendation[0]
@@ -96,10 +87,10 @@ client.on('interactionCreate', async interaction => {
       `💰 Current Price: ${currentPrice ? `${currency} ${currentPrice}` : 'N/A'}\n` +
       `🏢 Market Cap: ${marketCap}\n\n` +
       `📊 **Performance**\n` +
-      `30D: ${performance.d30}\n` +
-      `90D: ${performance.d90}\n` +
-      `180D: ${performance.d180}\n` +
-      `1Y: ${performance.y1}\n\n` +
+      `1M: ${performance.month1}\n` +
+      `3M: ${performance.month3}\n` +
+      `6M: ${performance.month6}\n` +
+      `1Y: ${performance.year1}\n\n` +
       `📈 **Analyst View**\n` +
       analystText;
 
@@ -111,63 +102,23 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-async function fetchYahooPrices_(ticker) {
-  const yahooTicker = convertToYahooTicker_(ticker);
-
-  const url =
-    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooTicker)}?range=1y&interval=1d`;
-
-  const data = await fetchJsonWithTimeout_(url, 5000);
-
-  const result = data &&
-    data.chart &&
-    data.chart.result &&
-    data.chart.result[0];
-
-  if (!result ||
-      !result.indicators ||
-      !result.indicators.quote ||
-      !result.indicators.quote[0] ||
-      !result.indicators.quote[0].close) {
-    return [];
-  }
-
-  return result.indicators.quote[0].close.filter(price => price !== null);
-}
-
-function convertToYahooTicker_(ticker) {
-  return String(ticker)
-    .trim()
-    .toUpperCase()
-    .replace('.', '-');
-}
-
-function calculatePerformance_(prices, currentPrice) {
-  if (!prices || prices.length === 0 || !currentPrice) {
-    return {
-      d30: 'N/A',
-      d90: 'N/A',
-      d180: 'N/A',
-      y1: 'N/A'
-    };
-  }
+function buildPerformanceText_(metrics) {
+  const metric = metrics && metrics.metric ? metrics.metric : {};
 
   return {
-    d30: calculateReturn_(prices, 30, currentPrice),
-    d90: calculateReturn_(prices, 90, currentPrice),
-    d180: calculateReturn_(prices, 180, currentPrice),
-    y1: calculateReturn_(prices, 365, currentPrice)
+    month1: formatMetricPercent_(metric['priceReturn1Month']),
+    month3: formatMetricPercent_(metric['priceReturn3Month']),
+    month6: formatMetricPercent_(metric['priceReturn6Month']),
+    year1: formatMetricPercent_(metric['priceReturn1Year'])
   };
 }
 
-function calculateReturn_(prices, daysAgo, currentPrice) {
-  const index = Math.max(0, prices.length - daysAgo);
-  const oldPrice = prices[index];
+function formatMetricPercent_(value) {
+  const n = Number(value);
 
-  if (!oldPrice || !currentPrice) return 'N/A';
+  if (!isFinite(n)) return 'N/A';
 
-  const change = ((currentPrice / oldPrice) - 1) * 100;
-  return `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
+  return `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
 }
 
 function buildAnalystText_(analyst) {
@@ -236,25 +187,6 @@ async function fetchJson(url) {
   }
 
   return await response.json();
-}
-
-async function fetchJsonWithTimeout_(url, timeoutMs) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    const response = await fetch(url, {
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    return await response.json();
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 client.login(DISCORD_TOKEN).catch(error => {
