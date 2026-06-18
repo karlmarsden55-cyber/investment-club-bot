@@ -48,20 +48,27 @@ client.on('interactionCreate', async interaction => {
   await interaction.deferReply();
 
   try {
-    const quote = await fetchJson(`https://finnhub.io/api/v1/quote?symbol=${ticker}&token=${FINNHUB_API_KEY}`);
-    const profile = await fetchJson(`https://finnhub.io/api/v1/stock/profile2?symbol=${ticker}&token=${FINNHUB_API_KEY}`);
-    const recommendation = await fetchJson(`https://finnhub.io/api/v1/stock/recommendation?symbol=${ticker}&token=${FINNHUB_API_KEY}`);
+    const quote = await fetchJson(
+      `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`
+    );
 
-    const candles = await fetchCandles_(ticker);
+    const profile = await fetchJson(
+      `https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`
+    );
 
-    const companyName = profile.name || ticker;
-    const price = quote.c || null;
-    const currency = profile.currency || '';
-    const marketCap = profile.marketCapitalization
-      ? `$${Number(profile.marketCapitalization).toLocaleString()}m`
+    const recommendation = await fetchJson(
+      `https://finnhub.io/api/v1/stock/recommendation?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`
+    );
+
+    const currentPrice = quote && quote.c ? quote.c : null;
+    const companyName = profile && profile.name ? profile.name : ticker;
+    const currency = profile && profile.currency ? profile.currency : '';
+    const marketCap = profile && profile.marketCapitalization
+      ? formatMarketCap_(profile.marketCapitalization)
       : 'N/A';
 
-    const performance = calculatePerformance_(candles, price);
+    const yahooPrices = await fetchYahooPrices_(ticker);
+    const performance = calculatePerformance_(yahooPrices, currentPrice);
 
     const analyst = Array.isArray(recommendation) && recommendation.length > 0
       ? recommendation[0]
@@ -74,7 +81,7 @@ client.on('interactionCreate', async interaction => {
     const message =
       `🔍 **STOCK SNAPSHOT**\n\n` +
       `**${companyName} (${ticker})**\n\n` +
-      `💰 Current Price: ${price ? `${currency} ${price}` : 'N/A'}\n` +
+      `💰 Current Price: ${currentPrice ? `${currency} ${currentPrice}` : 'N/A'}\n` +
       `🏢 Market Cap: ${marketCap}\n\n` +
       `📊 **Performance**\n` +
       `30D: ${performance.d30}\n` +
@@ -92,17 +99,39 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-async function fetchCandles_(ticker) {
-  const now = Math.floor(Date.now() / 1000);
-  const oneYearAgo = now - (370 * 24 * 60 * 60);
+async function fetchYahooPrices_(ticker) {
+  const yahooTicker = convertToYahooTicker_(ticker);
 
-  return await fetchJson(
-    `https://finnhub.io/api/v1/stock/candle?symbol=${ticker}&resolution=D&from=${oneYearAgo}&to=${now}&token=${FINNHUB_API_KEY}`
-  );
+  const url =
+    `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooTicker)}?range=1y&interval=1d`;
+
+  const data = await fetchJson(url);
+
+  const result = data &&
+    data.chart &&
+    data.chart.result &&
+    data.chart.result[0];
+
+  if (!result ||
+      !result.indicators ||
+      !result.indicators.quote ||
+      !result.indicators.quote[0] ||
+      !result.indicators.quote[0].close) {
+    return [];
+  }
+
+  return result.indicators.quote[0].close.filter(price => price !== null);
 }
 
-function calculatePerformance_(candles, currentPrice) {
-  if (!candles || candles.s !== 'ok' || !candles.c || candles.c.length === 0 || !currentPrice) {
+function convertToYahooTicker_(ticker) {
+  return String(ticker)
+    .trim()
+    .toUpperCase()
+    .replace('.', '-');
+}
+
+function calculatePerformance_(prices, currentPrice) {
+  if (!prices || prices.length === 0 || !currentPrice) {
     return {
       d30: 'N/A',
       d90: 'N/A',
@@ -112,10 +141,10 @@ function calculatePerformance_(candles, currentPrice) {
   }
 
   return {
-    d30: calculateReturn_(candles.c, 30, currentPrice),
-    d90: calculateReturn_(candles.c, 90, currentPrice),
-    d180: calculateReturn_(candles.c, 180, currentPrice),
-    y1: calculateReturn_(candles.c, 365, currentPrice)
+    d30: calculateReturn_(prices, 30, currentPrice),
+    d90: calculateReturn_(prices, 90, currentPrice),
+    d180: calculateReturn_(prices, 180, currentPrice),
+    y1: calculateReturn_(prices, 365, currentPrice)
   };
 }
 
@@ -130,13 +159,61 @@ function calculateReturn_(prices, daysAgo, currentPrice) {
 }
 
 function buildAnalystText_(analyst) {
+  const strongBuy = Number(analyst.strongBuy) || 0;
+  const buy = Number(analyst.buy) || 0;
+  const hold = Number(analyst.hold) || 0;
+  const sell = Number(analyst.sell) || 0;
+  const strongSell = Number(analyst.strongSell) || 0;
+
+  const view = getAnalystView_(strongBuy, buy, hold, sell, strongSell);
+
   return (
-    `Strong Buy: ${analyst.strongBuy}\n` +
-    `Buy: ${analyst.buy}\n` +
-    `Hold: ${analyst.hold}\n` +
-    `Sell: ${analyst.sell}\n` +
-    `Strong Sell: ${analyst.strongSell}`
+    `Consensus: ${view}\n` +
+    `Strong Buy: ${strongBuy}\n` +
+    `Buy: ${buy}\n` +
+    `Hold: ${hold}\n` +
+    `Sell: ${sell}\n` +
+    `Strong Sell: ${strongSell}`
   );
+}
+
+function getAnalystView_(strongBuy, buy, hold, sell, strongSell) {
+  const positive = strongBuy + buy;
+  const negative = sell + strongSell;
+
+  if (strongBuy >= buy && strongBuy >= hold && strongBuy >= negative && strongBuy > 0) {
+    return 'Strong Buy';
+  }
+
+  if (positive > hold && positive > negative) {
+    return 'Buy';
+  }
+
+  if (negative > positive && negative > hold) {
+    return 'Sell';
+  }
+
+  if (strongSell > 0 && negative >= positive) {
+    return 'Strong Sell';
+  }
+
+  return 'Neutral';
+}
+
+function formatMarketCap_(marketCapMillions) {
+  const value = Number(marketCapMillions);
+
+  if (!value) return 'N/A';
+
+  if (value >= 1000000) {
+    return `$${(value / 1000000).toFixed(2)}tn`;
+  }
+
+  if (value >= 1000) {
+    return `$${(value / 1000).toFixed(2)}bn`;
+  }
+
+  return `$${value.toFixed(2)}m`;
 }
 
 async function fetchJson(url) {
