@@ -5,11 +5,6 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 
-if (!DISCORD_TOKEN) console.error('Missing DISCORD_TOKEN');
-if (!CLIENT_ID) console.error('Missing CLIENT_ID');
-if (!GUILD_ID) console.error('Missing GUILD_ID');
-if (!FINNHUB_API_KEY) console.error('Missing FINNHUB_API_KEY');
-
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
@@ -57,33 +52,36 @@ client.on('interactionCreate', async interaction => {
     const profile = await fetchJson(`https://finnhub.io/api/v1/stock/profile2?symbol=${ticker}&token=${FINNHUB_API_KEY}`);
     const recommendation = await fetchJson(`https://finnhub.io/api/v1/stock/recommendation?symbol=${ticker}&token=${FINNHUB_API_KEY}`);
 
+    const candles = await fetchCandles_(ticker);
+
     const companyName = profile.name || ticker;
-    const price = quote.c ? quote.c : 'N/A';
+    const price = quote.c || null;
+    const currency = profile.currency || '';
     const marketCap = profile.marketCapitalization
       ? `$${Number(profile.marketCapitalization).toLocaleString()}m`
       : 'N/A';
+
+    const performance = calculatePerformance_(candles, price);
 
     const analyst = Array.isArray(recommendation) && recommendation.length > 0
       ? recommendation[0]
       : null;
 
-    let analystText = 'No analyst data available';
-
-    if (analyst) {
-      analystText =
-        `Strong Buy: ${analyst.strongBuy}\n` +
-        `Buy: ${analyst.buy}\n` +
-        `Hold: ${analyst.hold}\n` +
-        `Sell: ${analyst.sell}\n` +
-        `Strong Sell: ${analyst.strongSell}`;
-    }
+    const analystText = analyst
+      ? buildAnalystText_(analyst)
+      : 'No analyst data available';
 
     const message =
       `🔍 **STOCK SNAPSHOT**\n\n` +
       `**${companyName} (${ticker})**\n\n` +
-      `Current Price: ${price}\n` +
-      `Market Cap: ${marketCap}\n\n` +
-      `**Analyst View**\n` +
+      `💰 Current Price: ${price ? `${currency} ${price}` : 'N/A'}\n` +
+      `🏢 Market Cap: ${marketCap}\n\n` +
+      `📊 **Performance**\n` +
+      `30D: ${performance.d30}\n` +
+      `90D: ${performance.d90}\n` +
+      `180D: ${performance.d180}\n` +
+      `1Y: ${performance.y1}\n\n` +
+      `📈 **Analyst View**\n` +
       analystText;
 
     await interaction.editReply(message);
@@ -94,10 +92,53 @@ client.on('interactionCreate', async interaction => {
   }
 });
 
-client.login(DISCORD_TOKEN).catch(error => {
-  console.error('Bot login failed:');
-  console.error(error);
-});
+async function fetchCandles_(ticker) {
+  const now = Math.floor(Date.now() / 1000);
+  const oneYearAgo = now - (370 * 24 * 60 * 60);
+
+  return await fetchJson(
+    `https://finnhub.io/api/v1/stock/candle?symbol=${ticker}&resolution=D&from=${oneYearAgo}&to=${now}&token=${FINNHUB_API_KEY}`
+  );
+}
+
+function calculatePerformance_(candles, currentPrice) {
+  if (!candles || candles.s !== 'ok' || !candles.c || candles.c.length === 0 || !currentPrice) {
+    return {
+      d30: 'N/A',
+      d90: 'N/A',
+      d180: 'N/A',
+      y1: 'N/A'
+    };
+  }
+
+  return {
+    d30: calculateReturn_(candles.c, 30, currentPrice),
+    d90: calculateReturn_(candles.c, 90, currentPrice),
+    d180: calculateReturn_(candles.c, 180, currentPrice),
+    y1: calculateReturn_(candles.c, 365, currentPrice)
+  };
+}
+
+function calculateReturn_(prices, daysAgo, currentPrice) {
+  const index = Math.max(0, prices.length - daysAgo);
+  const oldPrice = prices[index];
+
+  if (!oldPrice || !currentPrice) return 'N/A';
+
+  const change = ((currentPrice / oldPrice) - 1) * 100;
+  return `${change >= 0 ? '+' : ''}${change.toFixed(2)}%`;
+}
+
+function buildAnalystText_(analyst) {
+  return (
+    `Strong Buy: ${analyst.strongBuy}\n` +
+    `Buy: ${analyst.buy}\n` +
+    `Hold: ${analyst.hold}\n` +
+    `Sell: ${analyst.sell}\n` +
+    `Strong Sell: ${analyst.strongSell}`
+  );
+}
+
 async function fetchJson(url) {
   const response = await fetch(url);
 
@@ -107,3 +148,8 @@ async function fetchJson(url) {
 
   return await response.json();
 }
+
+client.login(DISCORD_TOKEN).catch(error => {
+  console.error('Bot login failed:');
+  console.error(error);
+});
