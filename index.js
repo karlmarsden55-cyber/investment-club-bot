@@ -67,8 +67,20 @@ client.on('interactionCreate', async interaction => {
       ? formatMarketCap_(profile.marketCapitalization)
       : 'N/A';
 
-    const yahooPrices = await fetchYahooPrices_(ticker);
-    const performance = calculatePerformance_(yahooPrices, currentPrice);
+    let performance = {
+      d30: 'N/A',
+      d90: 'N/A',
+      d180: 'N/A',
+      y1: 'N/A'
+    };
+
+    try {
+      const yahooPrices = await fetchYahooPrices_(ticker);
+      performance = calculatePerformance_(yahooPrices, currentPrice);
+    } catch (error) {
+      console.error('Performance lookup failed:');
+      console.error(error);
+    }
 
     const analyst = Array.isArray(recommendation) && recommendation.length > 0
       ? recommendation[0]
@@ -105,7 +117,7 @@ async function fetchYahooPrices_(ticker) {
   const url =
     `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooTicker)}?range=1y&interval=1d`;
 
-  const data = await fetchJson(url);
+  const data = await fetchJsonWithTimeout_(url, 5000);
 
   const result = data &&
     data.chart &&
@@ -224,6 +236,25 @@ async function fetchJson(url) {
   }
 
   return await response.json();
+}
+
+async function fetchJsonWithTimeout_(url, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+
+    return await response.json();
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 client.login(DISCORD_TOKEN).catch(error => {
