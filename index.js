@@ -30,7 +30,6 @@ const commands = [
 
 client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
-
   console.log(`FINNHUB_API_KEY present: ${Boolean(FINNHUB_API_KEY)}`);
   console.log(`EODHD_API_KEY present: ${Boolean(EODHD_API_KEY)}`);
 
@@ -192,19 +191,22 @@ async function tryEodhd_(candidate, userTicker) {
 
     const latest = history[history.length - 1];
     const price = latest.close;
-
     const performance = buildPerformanceFromHistory_(history, price);
 
-    const profile = await safeFinnhubProfile_(candidate.finnhub);
+    const fundamentals = await safeEodhdFundamentals_(candidate.eodhd);
+    const general = fundamentals && fundamentals.General ? fundamentals.General : {};
+
+    console.log(`EODHD fundamentals for ${candidate.eodhd}: ${JSON.stringify(general).slice(0, 700)}`);
+
     const recommendation = await safeFinnhubRecommendation_(candidate.finnhub);
 
     return {
       source: 'EODHD EOD',
       symbol: candidate.eodhd,
-      name: profile.name || candidate.display || userTicker,
+      name: general.Name || general.NameEnglish || candidate.display || userTicker,
       price,
-      currency: profile.currency || '',
-      marketCap: profile.marketCapitalization ? formatMarketCap_(profile.marketCapitalization) : 'N/A',
+      currency: general.CurrencyCode || general.CurrencyName || '',
+      marketCap: general.MarketCapitalization ? formatLargeNumber_(general.MarketCapitalization, general.CurrencyCode) : 'N/A',
       performance,
       recommendation
     };
@@ -239,6 +241,20 @@ async function fetchEodhdHistory_(symbol) {
     }))
     .filter(row => row.date && isFinite(row.close) && row.close > 0)
     .sort((a, b) => new Date(a.date) - new Date(b.date));
+}
+
+async function safeEodhdFundamentals_(symbol) {
+  if (!symbol || !EODHD_API_KEY) return {};
+
+  try {
+    return await fetchJson(
+      `https://eodhd.com/api/fundamentals/${encodeURIComponent(symbol)}?api_token=${encodeURIComponent(EODHD_API_KEY)}&fmt=json`
+    );
+  } catch (error) {
+    console.error(`EODHD fundamentals failed for ${symbol}`);
+    console.error(error);
+    return {};
+  }
 }
 
 async function tryFinnhub_(candidate, userTicker) {
@@ -323,6 +339,13 @@ function buildAnalystText_(analyst) {
   const hold = Number(analyst.hold) || 0;
   const sell = Number(analyst.sell) || 0;
   const strongSell = Number(analyst.strongSell) || 0;
+
+  const total = strongBuy + buy + hold + sell + strongSell;
+
+  if (total === 0) {
+    return 'No analyst data available';
+  }
+
   const view = getAnalystView_(strongBuy, buy, hold, sell, strongSell);
 
   return (
@@ -402,9 +425,22 @@ function formatMetricPercent_(value) {
 function formatMarketCap_(marketCapMillions) {
   const value = Number(marketCapMillions);
   if (!value) return 'N/A';
-  if (value >= 1000000) return `$${(value / 1000000).toFixed(2)}tn`;
-  if (value >= 1000) return `$${(value / 1000).toFixed(2)}bn`;
-  return `$${value.toFixed(2)}m`;
+
+  const absoluteValue = value * 1000000;
+  return formatLargeNumber_(absoluteValue, 'USD');
+}
+
+function formatLargeNumber_(value, currency) {
+  const n = Number(value);
+  if (!isFinite(n) || n <= 0) return 'N/A';
+
+  const prefix = currency ? `${currency} ` : '';
+
+  if (n >= 1000000000000) return `${prefix}${(n / 1000000000000).toFixed(2)}tn`;
+  if (n >= 1000000000) return `${prefix}${(n / 1000000000).toFixed(2)}bn`;
+  if (n >= 1000000) return `${prefix}${(n / 1000000).toFixed(2)}m`;
+
+  return `${prefix}${n.toLocaleString()}`;
 }
 
 async function fetchJson(url) {
