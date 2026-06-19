@@ -5,15 +5,17 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 const EODHD_API_KEY = process.env.EODHD_API_KEY;
+const FMP_API_KEY = process.env.FMP_API_KEY;
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const manualTickerMap = {
-  REL: { eodhd: 'REL.LSE', finnhub: 'REL.L' },
-  SGRO: { eodhd: 'SGRO.LSE', finnhub: 'SGRO.L' },
-  HWG: { eodhd: 'HWG.LSE', finnhub: 'HWG.L' },
-  NDX1: { eodhd: 'NDX1.XETRA', finnhub: 'NDX1.DE' },
-  AEDAS: { eodhd: 'AEDAS.MC', finnhub: 'AEDAS.MC' }
+  REL: { eodhd: 'REL.LSE', finnhub: 'REL.L', fmp: 'REL.L' },
+  SGRO: { eodhd: 'SGRO.LSE', finnhub: 'SGRO.L', fmp: 'SGRO.L' },
+  HWG: { eodhd: 'HWG.LSE', finnhub: 'HWG.L', fmp: 'HWG.L' },
+  CWR: { eodhd: 'CWR.LSE', finnhub: 'CWR.L', fmp: 'CWR.L' },
+  NDX1: { eodhd: 'NDX1.XETRA', finnhub: 'NDX1.DE', fmp: 'NDX1.DE' },
+  AEDAS: { eodhd: 'AEDAS.MC', finnhub: 'AEDAS.MC', fmp: 'AEDAS.MC' }
 };
 
 const commands = [
@@ -23,7 +25,7 @@ const commands = [
     .addStringOption(option =>
       option
         .setName('ticker')
-        .setDescription('Ticker symbol, e.g. PLTR, REL, SGRO, NDX1')
+        .setDescription('Ticker symbol, e.g. PLTR, REL, SGRO, CWR, NDX1')
         .setRequired(true)
     )
 ].map(command => command.toJSON());
@@ -32,6 +34,7 @@ client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   console.log(`FINNHUB_API_KEY present: ${Boolean(FINNHUB_API_KEY)}`);
   console.log(`EODHD_API_KEY present: ${Boolean(EODHD_API_KEY)}`);
+  console.log(`FMP_API_KEY present: ${Boolean(FMP_API_KEY)}`);
 
   try {
     const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
@@ -59,9 +62,7 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
-    const analystText = resolved.recommendation
-      ? buildAnalystText_(resolved.recommendation)
-      : 'No analyst data available';
+    const analystText = resolved.analystText || 'No analyst data available';
 
     const message =
       `🔍 **STOCK SNAPSHOT**\n\n` +
@@ -75,7 +76,7 @@ client.on('interactionCreate', async interaction => {
       `13W: ${resolved.performance.week13}\n` +
       `26W: ${resolved.performance.week26}\n` +
       `52W: ${resolved.performance.week52}\n\n` +
-      `📈 **Analyst View**\n` +
+      `📈 **Analyst / Rating View**\n` +
       analystText;
 
     await interaction.editReply(message);
@@ -110,9 +111,24 @@ function buildTickerCandidates_(userTicker) {
 
   if (manualTickerMap[raw]) {
     return [
-      { display: raw, eodhd: manualTickerMap[raw].eodhd, finnhub: manualTickerMap[raw].finnhub },
-      { display: raw, eodhd: `${raw}.LSE`, finnhub: `${raw}.L` },
-      { display: raw, eodhd: `${raw}.US`, finnhub: raw }
+      {
+        display: raw,
+        eodhd: manualTickerMap[raw].eodhd,
+        finnhub: manualTickerMap[raw].finnhub,
+        fmp: manualTickerMap[raw].fmp
+      },
+      {
+        display: raw,
+        eodhd: `${raw}.LSE`,
+        finnhub: `${raw}.L`,
+        fmp: `${raw}.L`
+      },
+      {
+        display: raw,
+        eodhd: `${raw}.US`,
+        finnhub: raw,
+        fmp: raw
+      }
     ];
   }
 
@@ -123,32 +139,38 @@ function buildTickerCandidates_(userTicker) {
       {
         display: ticker,
         eodhd: mapExchangeToEodhd_(exchange, ticker),
-        finnhub: mapExchangeToFinnhub_(exchange, ticker)
+        finnhub: mapExchangeToFinnhub_(exchange, ticker),
+        fmp: mapExchangeToFmp_(exchange, ticker)
       },
-      { display: ticker, eodhd: `${ticker}.US`, finnhub: ticker }
+      {
+        display: ticker,
+        eodhd: `${ticker}.US`,
+        finnhub: ticker,
+        fmp: ticker
+      }
     ];
   }
 
   if (raw.endsWith('.L')) {
     const ticker = raw.replace('.L', '');
-    return [{ display: ticker, eodhd: `${ticker}.LSE`, finnhub: raw }];
+    return [{ display: ticker, eodhd: `${ticker}.LSE`, finnhub: raw, fmp: raw }];
   }
 
   if (raw.endsWith('.DE')) {
     const ticker = raw.replace('.DE', '');
-    return [{ display: ticker, eodhd: `${ticker}.XETRA`, finnhub: raw }];
+    return [{ display: ticker, eodhd: `${ticker}.XETRA`, finnhub: raw, fmp: raw }];
   }
 
   if (raw.endsWith('.MC')) {
     const ticker = raw.replace('.MC', '');
-    return [{ display: ticker, eodhd: `${ticker}.MC`, finnhub: raw }];
+    return [{ display: ticker, eodhd: `${ticker}.MC`, finnhub: raw, fmp: raw }];
   }
 
   return [
-    { display: raw, eodhd: `${raw}.US`, finnhub: raw },
-    { display: raw, eodhd: `${raw}.LSE`, finnhub: `${raw}.L` },
-    { display: raw, eodhd: `${raw}.XETRA`, finnhub: `${raw}.DE` },
-    { display: raw, eodhd: `${raw}.MC`, finnhub: `${raw}.MC` }
+    { display: raw, eodhd: `${raw}.US`, finnhub: raw, fmp: raw },
+    { display: raw, eodhd: `${raw}.LSE`, finnhub: `${raw}.L`, fmp: `${raw}.L` },
+    { display: raw, eodhd: `${raw}.XETRA`, finnhub: `${raw}.DE`, fmp: `${raw}.DE` },
+    { display: raw, eodhd: `${raw}.MC`, finnhub: `${raw}.MC`, fmp: `${raw}.MC` }
   ];
 }
 
@@ -164,6 +186,17 @@ function mapExchangeToEodhd_(exchange, ticker) {
 }
 
 function mapExchangeToFinnhub_(exchange, ticker) {
+  const ex = String(exchange).toUpperCase();
+
+  if (ex === 'LON' || ex === 'LSE' || ex === 'XLON') return `${ticker}.L`;
+  if (ex === 'ETR' || ex === 'XETR') return `${ticker}.DE`;
+  if (ex === 'BME' || ex === 'XMAD') return `${ticker}.MC`;
+  if (ex === 'NASDAQ' || ex === 'NYSE') return ticker;
+
+  return ticker;
+}
+
+function mapExchangeToFmp_(exchange, ticker) {
   const ex = String(exchange).toUpperCase();
 
   if (ex === 'LON' || ex === 'LSE' || ex === 'XLON') return `${ticker}.L`;
@@ -193,22 +226,26 @@ async function tryEodhd_(candidate, userTicker) {
     const price = latest.close;
     const performance = buildPerformanceFromHistory_(history, price);
 
-    const fundamentals = await safeEodhdFundamentals_(candidate.eodhd);
-    const general = fundamentals && fundamentals.General ? fundamentals.General : {};
+    const fmpProfile = await safeFmpProfile_(candidate.fmp);
+    const fmpRating = await safeFmpRating_(candidate.fmp);
 
-    console.log(`EODHD fundamentals for ${candidate.eodhd}: ${JSON.stringify(general).slice(0, 700)}`);
+    console.log(`FMP profile for ${candidate.fmp}: ${JSON.stringify(fmpProfile).slice(0, 700)}`);
+    console.log(`FMP rating for ${candidate.fmp}: ${JSON.stringify(fmpRating).slice(0, 700)}`);
 
-    const recommendation = await safeFinnhubRecommendation_(candidate.finnhub);
+    const name = fmpProfile.companyName || candidate.display || userTicker;
+    const currency = fmpProfile.currency || '';
+    const marketCap = fmpProfile.mktCap ? formatLargeNumber_(fmpProfile.mktCap, currency) : 'N/A';
+    const analystText = buildFmpRatingText_(fmpRating);
 
     return {
-      source: 'EODHD EOD',
+      source: 'EODHD EOD + FMP',
       symbol: candidate.eodhd,
-      name: general.Name || general.NameEnglish || candidate.display || userTicker,
+      name,
       price,
-      currency: general.CurrencyCode || general.CurrencyName || '',
-      marketCap: general.MarketCapitalization ? formatLargeNumber_(general.MarketCapitalization, general.CurrencyCode) : 'N/A',
+      currency,
+      marketCap,
       performance,
-      recommendation
+      analystText
     };
   } catch (error) {
     console.error(`EODHD candidate failed: ${candidate.eodhd}`);
@@ -243,20 +280,6 @@ async function fetchEodhdHistory_(symbol) {
     .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
 
-async function safeEodhdFundamentals_(symbol) {
-  if (!symbol || !EODHD_API_KEY) return {};
-
-  try {
-    return await fetchJson(
-      `https://eodhd.com/api/fundamentals/${encodeURIComponent(symbol)}?api_token=${encodeURIComponent(EODHD_API_KEY)}&fmt=json`
-    );
-  } catch (error) {
-    console.error(`EODHD fundamentals failed for ${symbol}`);
-    console.error(error);
-    return {};
-  }
-}
-
 async function tryFinnhub_(candidate, userTicker) {
   if (!FINNHUB_API_KEY || !candidate.finnhub) return null;
 
@@ -281,12 +304,48 @@ async function tryFinnhub_(candidate, userTicker) {
       currency: profile.currency || '',
       marketCap: profile.marketCapitalization ? formatMarketCap_(profile.marketCapitalization) : 'N/A',
       performance: buildPerformanceFromFinnhubMetrics_(metrics),
-      recommendation
+      analystText: buildAnalystText_(recommendation && recommendation[0] ? recommendation[0] : null)
     };
   } catch (error) {
     console.error(`Finnhub candidate failed: ${candidate.finnhub}`);
     console.error(error);
     return null;
+  }
+}
+
+async function safeFmpProfile_(symbol) {
+  if (!symbol || !FMP_API_KEY) return {};
+
+  try {
+    const data = await fetchJson(
+      `https://financialmodelingprep.com/api/v3/profile/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(FMP_API_KEY)}`
+    );
+
+    if (Array.isArray(data) && data.length > 0) return data[0];
+
+    return {};
+  } catch (error) {
+    console.error(`FMP profile failed for ${symbol}`);
+    console.error(error);
+    return {};
+  }
+}
+
+async function safeFmpRating_(symbol) {
+  if (!symbol || !FMP_API_KEY) return {};
+
+  try {
+    const data = await fetchJson(
+      `https://financialmodelingprep.com/api/v3/rating/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(FMP_API_KEY)}`
+    );
+
+    if (Array.isArray(data) && data.length > 0) return data[0];
+
+    return {};
+  } catch (error) {
+    console.error(`FMP rating failed for ${symbol}`);
+    console.error(error);
+    return {};
   }
 }
 
@@ -333,7 +392,29 @@ function emptyPerformance_() {
   };
 }
 
+function buildFmpRatingText_(rating) {
+  if (!rating || Object.keys(rating).length === 0) {
+    return 'No analyst/rating data available';
+  }
+
+  const recommendation = rating.ratingRecommendation || rating.rating || 'N/A';
+  const score = rating.ratingScore !== undefined ? rating.ratingScore : 'N/A';
+
+  return (
+    `Rating: ${recommendation}\n` +
+    `Score: ${score}/5\n` +
+    `DCF Score: ${rating.ratingDetailsDCFScore ?? 'N/A'}\n` +
+    `ROE Score: ${rating.ratingDetailsROEScore ?? 'N/A'}\n` +
+    `ROA Score: ${rating.ratingDetailsROAScore ?? 'N/A'}\n` +
+    `DE Score: ${rating.ratingDetailsDEScore ?? 'N/A'}\n` +
+    `PE Score: ${rating.ratingDetailsPEScore ?? 'N/A'}\n` +
+    `PB Score: ${rating.ratingDetailsPBScore ?? 'N/A'}`
+  );
+}
+
 function buildAnalystText_(analyst) {
+  if (!analyst) return 'No analyst data available';
+
   const strongBuy = Number(analyst.strongBuy) || 0;
   const buy = Number(analyst.buy) || 0;
   const hold = Number(analyst.hold) || 0;
