@@ -9,11 +9,11 @@ const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const manualTickerMap = {
-  AEDAS: { symbol: 'AEDAS', exchange: 'BME', finnhub: 'AEDAS.MC' },
-  HWG: { symbol: 'HWG', exchange: 'LSE', finnhub: 'HWG.L' },
-  NDX1: { symbol: 'NDX1', exchange: 'XETR', finnhub: 'NDX1.DE' },
-  REL: { symbol: 'REL', exchange: 'LSE', finnhub: 'REL.L' },
-  SGRO: { symbol: 'SGRO', exchange: 'LSE', finnhub: 'SGRO.L' }
+  AEDAS: { symbol: 'AEDAS', micCode: null, finnhub: 'AEDAS.MC' },
+  HWG: { symbol: 'HWG', micCode: 'XLON', finnhub: 'HWG.L' },
+  NDX1: { symbol: 'NDX1', micCode: 'XETR', finnhub: 'NDX1.DE' },
+  REL: { symbol: 'REL', micCode: 'XLON', finnhub: 'REL.L' },
+  SGRO: { symbol: 'SGRO', micCode: 'XLON', finnhub: 'SGRO.L' }
 };
 
 const commands = [
@@ -104,12 +104,16 @@ client.on('interactionCreate', async interaction => {
 });
 
 async function resolveTicker_(userTicker) {
-  const candidates = buildTickerCandidates_(userTicker);
+  const baseCandidates = buildTickerCandidates_(userTicker);
 
   console.log(`--- LOOKUP FOR ${userTicker} ---`);
-  console.log(`Candidates: ${JSON.stringify(candidates)}`);
+  console.log(`Base candidates: ${JSON.stringify(baseCandidates)}`);
 
-  for (const candidate of candidates) {
+  const twelveCandidates = await buildTwelveDataCandidates_(userTicker, baseCandidates);
+
+  console.log(`Twelve candidates: ${JSON.stringify(twelveCandidates)}`);
+
+  for (const candidate of twelveCandidates) {
     const twelveResult = await tryTwelveData_(candidate, userTicker);
 
     if (twelveResult) {
@@ -118,7 +122,7 @@ async function resolveTicker_(userTicker) {
     }
   }
 
-  for (const candidate of candidates) {
+  for (const candidate of baseCandidates) {
     const finnhubResult = await tryFinnhub_(candidate, userTicker);
 
     if (finnhubResult) {
@@ -131,6 +135,60 @@ async function resolveTicker_(userTicker) {
   return null;
 }
 
+async function buildTwelveDataCandidates_(userTicker, baseCandidates) {
+  const candidates = [...baseCandidates];
+
+  try {
+    const searchSymbol = stripExchangePrefix_(userTicker);
+    const searchUrl =
+      `https://api.twelvedata.com/symbol_search?symbol=${encodeURIComponent(searchSymbol)}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`;
+
+    const search = await fetchJson(searchUrl);
+
+    console.log(`Twelve symbol search for ${searchSymbol}: ${JSON.stringify(search).slice(0, 1000)}`);
+
+    const results = Array.isArray(search.data) ? search.data : [];
+
+    results.forEach(item => {
+      if (!item || !item.symbol) return;
+
+      candidates.push({
+        symbol: String(item.symbol).toUpperCase(),
+        micCode: item.mic_code || null,
+        exchange: item.exchange || null,
+        finnhub: mapFinnhubSymbolFromSearch_(item)
+      });
+    });
+  } catch (error) {
+    console.error('Twelve symbol search failed:');
+    console.error(error);
+  }
+
+  return uniqueCandidates_(rankCandidates_(candidates, userTicker));
+}
+
+function rankCandidates_(candidates, userTicker) {
+  const raw = stripExchangePrefix_(userTicker).replace(/\.(L|DE|MC|HK)$/i, '').toUpperCase();
+
+  return candidates.sort((a, b) => {
+    const aScore = scoreCandidate_(a, raw);
+    const bScore = scoreCandidate_(b, raw);
+    return bScore - aScore;
+  });
+}
+
+function scoreCandidate_(candidate, raw) {
+  let score = 0;
+
+  if (candidate.symbol === raw) score += 10;
+  if (candidate.micCode === 'XLON') score += 5;
+  if (candidate.micCode === 'XETR') score += 4;
+  if (candidate.micCode === 'BMEX' || candidate.micCode === 'XMAD') score += 4;
+  if (candidate.micCode === 'XNAS' || candidate.micCode === 'XNYS') score += 3;
+
+  return score;
+}
+
 async function tryTwelveData_(candidate, userTicker) {
   if (!TWELVE_DATA_API_KEY) {
     console.error('Missing TWELVE_DATA_API_KEY');
@@ -141,10 +199,9 @@ async function tryTwelveData_(candidate, userTicker) {
     const quoteUrl = buildTwelveDataUrl_('quote', candidate);
     const quoteRaw = await fetchJson(quoteUrl);
 
-    if (quoteRaw.status === 'error' || quoteRaw.code || quoteRaw.message) {
-      console.log(`Twelve quote failed for ${candidate.symbol} ${candidate.exchange || ''}: ${JSON.stringify(quoteRaw)}`);
-      return null;
-    }
+    console.log(`Twelve quote for ${JSON.stringify(candidate)}: ${JSON.stringify(quoteRaw).slice(0, 700)}`);
+
+    if (isTwelveDataError_(quoteRaw)) return null;
 
     const price = firstNumber_([
       quoteRaw.close,
@@ -152,10 +209,7 @@ async function tryTwelveData_(candidate, userTicker) {
       quoteRaw.previous_close
     ]);
 
-    if (!price) {
-      console.log(`Twelve quote had no price for ${candidate.symbol} ${candidate.exchange || ''}`);
-      return null;
-    }
+    if (!price) return null;
 
     const timeSeriesUrl = buildTwelveDataUrl_('time_series', candidate, {
       interval: '1day',
@@ -246,60 +300,72 @@ function buildTickerCandidates_(userTicker) {
   if (manualTickerMap[raw]) {
     return [
       manualTickerMap[raw],
-      { symbol: raw, exchange: null, finnhub: raw }
+      { symbol: raw, micCode: null, exchange: null, finnhub: raw }
     ];
   }
 
   if (raw.includes(':')) {
     const [exchange, ticker] = raw.split(':');
-    const mappedExchange = mapExchange_(exchange);
+    const micCode = mapExchangeToMicCode_(exchange);
 
     return uniqueCandidates_([
-      { symbol: ticker, exchange: mappedExchange, finnhub: mapFinnhubSymbol_(exchange, ticker) },
-      { symbol: ticker, exchange: null, finnhub: ticker },
-      { symbol: raw, exchange: null, finnhub: raw }
+      { symbol: ticker, micCode, exchange: null, finnhub: mapFinnhubSymbol_(exchange, ticker) },
+      { symbol: ticker, micCode: null, exchange: null, finnhub: ticker },
+      { symbol: raw, micCode: null, exchange: null, finnhub: raw }
     ]);
   }
 
   if (raw.endsWith('.L')) {
     const ticker = raw.replace('.L', '');
     return uniqueCandidates_([
-      { symbol: ticker, exchange: 'LSE', finnhub: raw },
-      { symbol: raw, exchange: null, finnhub: raw }
+      { symbol: ticker, micCode: 'XLON', exchange: null, finnhub: raw },
+      { symbol: raw, micCode: null, exchange: null, finnhub: raw }
     ]);
   }
 
   if (raw.endsWith('.DE')) {
     const ticker = raw.replace('.DE', '');
     return uniqueCandidates_([
-      { symbol: ticker, exchange: 'XETR', finnhub: raw },
-      { symbol: raw, exchange: null, finnhub: raw }
+      { symbol: ticker, micCode: 'XETR', exchange: null, finnhub: raw },
+      { symbol: raw, micCode: null, exchange: null, finnhub: raw }
     ]);
   }
 
   if (raw.endsWith('.MC')) {
     const ticker = raw.replace('.MC', '');
     return uniqueCandidates_([
-      { symbol: ticker, exchange: 'BME', finnhub: raw },
-      { symbol: raw, exchange: null, finnhub: raw }
+      { symbol: ticker, micCode: 'BMEX', exchange: null, finnhub: raw },
+      { symbol: ticker, micCode: 'XMAD', exchange: null, finnhub: raw },
+      { symbol: raw, micCode: null, exchange: null, finnhub: raw }
     ]);
   }
 
   if (raw.endsWith('.HK')) {
     const ticker = raw.replace('.HK', '');
     return uniqueCandidates_([
-      { symbol: ticker, exchange: 'HKEX', finnhub: raw },
-      { symbol: raw, exchange: null, finnhub: raw }
+      { symbol: ticker, micCode: 'XHKG', exchange: null, finnhub: raw },
+      { symbol: raw, micCode: null, exchange: null, finnhub: raw }
     ]);
   }
 
   return uniqueCandidates_([
-    { symbol: raw, exchange: null, finnhub: raw },
-    { symbol: raw, exchange: 'LSE', finnhub: `${raw}.L` },
-    { symbol: raw, exchange: 'XETR', finnhub: `${raw}.DE` },
-    { symbol: raw, exchange: 'BME', finnhub: `${raw}.MC` },
-    { symbol: raw, exchange: 'HKEX', finnhub: `${raw}.HK` }
+    { symbol: raw, micCode: null, exchange: null, finnhub: raw },
+    { symbol: raw, micCode: 'XLON', exchange: null, finnhub: `${raw}.L` },
+    { symbol: raw, micCode: 'XETR', exchange: null, finnhub: `${raw}.DE` },
+    { symbol: raw, micCode: 'BMEX', exchange: null, finnhub: `${raw}.MC` },
+    { symbol: raw, micCode: 'XMAD', exchange: null, finnhub: `${raw}.MC` },
+    { symbol: raw, micCode: 'XHKG', exchange: null, finnhub: `${raw}.HK` }
   ]);
+}
+
+function stripExchangePrefix_(ticker) {
+  const raw = String(ticker).trim().toUpperCase();
+
+  if (raw.includes(':')) {
+    return raw.split(':')[1];
+  }
+
+  return raw;
 }
 
 function uniqueCandidates_(candidates) {
@@ -307,7 +373,7 @@ function uniqueCandidates_(candidates) {
   const output = [];
 
   for (const candidate of candidates) {
-    const key = `${candidate.symbol}|${candidate.exchange || ''}|${candidate.finnhub || ''}`;
+    const key = `${candidate.symbol}|${candidate.micCode || ''}|${candidate.exchange || ''}|${candidate.finnhub || ''}`;
 
     if (!seen.has(key)) {
       seen.add(key);
@@ -318,16 +384,17 @@ function uniqueCandidates_(candidates) {
   return output;
 }
 
-function mapExchange_(exchange) {
+function mapExchangeToMicCode_(exchange) {
   const map = {
-    LON: 'LSE',
-    LSE: 'LSE',
-    XLON: 'LSE',
+    LON: 'XLON',
+    LSE: 'XLON',
+    XLON: 'XLON',
     ETR: 'XETR',
     XETR: 'XETR',
-    BME: 'BME',
-    HKG: 'HKEX',
-    HKEX: 'HKEX',
+    BME: 'BMEX',
+    BMEX: 'BMEX',
+    HKG: 'XHKG',
+    HKEX: 'XHKG',
     NASDAQ: null,
     NYSE: null
   };
@@ -338,15 +405,31 @@ function mapExchange_(exchange) {
 function mapFinnhubSymbol_(exchange, ticker) {
   if (exchange === 'LON' || exchange === 'LSE' || exchange === 'XLON') return `${ticker}.L`;
   if (exchange === 'ETR' || exchange === 'XETR') return `${ticker}.DE`;
-  if (exchange === 'BME') return `${ticker}.MC`;
+  if (exchange === 'BME' || exchange === 'BMEX') return `${ticker}.MC`;
   if (exchange === 'HKG' || exchange === 'HKEX') return `${ticker}.HK`;
   return ticker;
+}
+
+function mapFinnhubSymbolFromSearch_(item) {
+  const symbol = String(item.symbol || '').toUpperCase();
+  const mic = String(item.mic_code || '').toUpperCase();
+
+  if (mic === 'XLON') return `${symbol}.L`;
+  if (mic === 'XETR') return `${symbol}.DE`;
+  if (mic === 'BMEX' || mic === 'XMAD') return `${symbol}.MC`;
+  if (mic === 'XHKG') return `${symbol}.HK`;
+
+  return symbol;
 }
 
 function buildTwelveDataUrl_(endpoint, candidate, extraParams = {}) {
   const params = new URLSearchParams();
 
   params.set('symbol', candidate.symbol);
+
+  if (candidate.micCode) {
+    params.set('mic_code', candidate.micCode);
+  }
 
   if (candidate.exchange) {
     params.set('exchange', candidate.exchange);
@@ -359,6 +442,13 @@ function buildTwelveDataUrl_(endpoint, candidate, extraParams = {}) {
   params.set('apikey', TWELVE_DATA_API_KEY);
 
   return `https://api.twelvedata.com/${endpoint}?${params.toString()}`;
+}
+
+function isTwelveDataError_(data) {
+  if (!data) return true;
+  if (data.status === 'error') return true;
+  if (data.code || data.message) return true;
+  return false;
 }
 
 function buildPerformanceFromTwelveData_(timeSeries, currentPrice) {
@@ -527,9 +617,9 @@ function formatMarketCap_(marketCapMillions) {
 }
 
 function buildDisplaySymbol_(candidate) {
-  return candidate.exchange
-    ? `${candidate.symbol}:${candidate.exchange}`
-    : candidate.symbol;
+  if (candidate.micCode) return `${candidate.symbol}:${candidate.micCode}`;
+  if (candidate.exchange) return `${candidate.symbol}:${candidate.exchange}`;
+  return candidate.symbol;
 }
 
 async function fetchJson(url) {
