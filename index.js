@@ -5,17 +5,16 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 const EODHD_API_KEY = process.env.EODHD_API_KEY;
-const FMP_API_KEY = process.env.FMP_API_KEY;
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const manualTickerMap = {
-  REL: { eodhd: 'REL.LSE', finnhub: 'REL.L', fmp: 'REL.L' },
-  SGRO: { eodhd: 'SGRO.LSE', finnhub: 'SGRO.L', fmp: 'SGRO.L' },
-  HWG: { eodhd: 'HWG.LSE', finnhub: 'HWG.L', fmp: 'HWG.L' },
-  CWR: { eodhd: 'CWR.LSE', finnhub: 'CWR.L', fmp: 'CWR.L' },
-  NDX1: { eodhd: 'NDX1.XETRA', finnhub: 'NDX1.DE', fmp: 'NDX1.DE' },
-  AEDAS: { eodhd: 'AEDAS.MC', finnhub: 'AEDAS.MC', fmp: 'AEDAS.MC' }
+  REL: { eodhd: 'REL.LSE', finnhub: 'REL.L', region: 'UK' },
+  SGRO: { eodhd: 'SGRO.LSE', finnhub: 'SGRO.L', region: 'UK' },
+  HWG: { eodhd: 'HWG.LSE', finnhub: 'HWG.L', region: 'UK' },
+  CWR: { eodhd: 'CWR.LSE', finnhub: 'CWR.L', region: 'UK' },
+  NDX1: { eodhd: 'NDX1.XETRA', finnhub: 'NDX1.DE', region: 'EU' },
+  AEDAS: { eodhd: 'AEDAS.MC', finnhub: 'AEDAS.MC', region: 'EU' }
 };
 
 const commands = [
@@ -34,7 +33,6 @@ client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   console.log(`FINNHUB_API_KEY present: ${Boolean(FINNHUB_API_KEY)}`);
   console.log(`EODHD_API_KEY present: ${Boolean(EODHD_API_KEY)}`);
-  console.log(`FMP_API_KEY present: ${Boolean(FMP_API_KEY)}`);
 
   try {
     const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
@@ -62,8 +60,6 @@ client.on('interactionCreate', async interaction => {
       return;
     }
 
-    const analystText = resolved.analystText || 'No analyst data available';
-
     const message =
       `🔍 **STOCK SNAPSHOT**\n\n` +
       `**${resolved.name} (${resolved.symbol})**\n` +
@@ -76,8 +72,8 @@ client.on('interactionCreate', async interaction => {
       `13W: ${resolved.performance.week13}\n` +
       `26W: ${resolved.performance.week26}\n` +
       `52W: ${resolved.performance.week52}\n\n` +
-      `📈 **Analyst / Rating View**\n` +
-      analystText;
+      `📈 **Analyst View**\n` +
+      `${resolved.analystText || 'No analyst data available'}`;
 
     await interaction.editReply(message);
   } catch (error) {
@@ -92,6 +88,13 @@ async function resolveTicker_(userTicker) {
 
   console.log(`--- LOOKUP FOR ${userTicker} ---`);
   console.log(`Candidates: ${JSON.stringify(candidates)}`);
+
+  for (const candidate of candidates) {
+    if (candidate.region === 'US') {
+      const finnhubResult = await tryFinnhub_(candidate, userTicker);
+      if (finnhubResult) return finnhubResult;
+    }
+  }
 
   for (const candidate of candidates) {
     const eodResult = await tryEodhd_(candidate, userTicker);
@@ -115,19 +118,13 @@ function buildTickerCandidates_(userTicker) {
         display: raw,
         eodhd: manualTickerMap[raw].eodhd,
         finnhub: manualTickerMap[raw].finnhub,
-        fmp: manualTickerMap[raw].fmp
-      },
-      {
-        display: raw,
-        eodhd: `${raw}.LSE`,
-        finnhub: `${raw}.L`,
-        fmp: `${raw}.L`
+        region: manualTickerMap[raw].region
       },
       {
         display: raw,
         eodhd: `${raw}.US`,
         finnhub: raw,
-        fmp: raw
+        region: 'US'
       }
     ];
   }
@@ -140,37 +137,37 @@ function buildTickerCandidates_(userTicker) {
         display: ticker,
         eodhd: mapExchangeToEodhd_(exchange, ticker),
         finnhub: mapExchangeToFinnhub_(exchange, ticker),
-        fmp: mapExchangeToFmp_(exchange, ticker)
+        region: mapExchangeToRegion_(exchange)
       },
       {
         display: ticker,
         eodhd: `${ticker}.US`,
         finnhub: ticker,
-        fmp: ticker
+        region: 'US'
       }
     ];
   }
 
   if (raw.endsWith('.L')) {
     const ticker = raw.replace('.L', '');
-    return [{ display: ticker, eodhd: `${ticker}.LSE`, finnhub: raw, fmp: raw }];
+    return [{ display: ticker, eodhd: `${ticker}.LSE`, finnhub: raw, region: 'UK' }];
   }
 
   if (raw.endsWith('.DE')) {
     const ticker = raw.replace('.DE', '');
-    return [{ display: ticker, eodhd: `${ticker}.XETRA`, finnhub: raw, fmp: raw }];
+    return [{ display: ticker, eodhd: `${ticker}.XETRA`, finnhub: raw, region: 'EU' }];
   }
 
   if (raw.endsWith('.MC')) {
     const ticker = raw.replace('.MC', '');
-    return [{ display: ticker, eodhd: `${ticker}.MC`, finnhub: raw, fmp: raw }];
+    return [{ display: ticker, eodhd: `${ticker}.MC`, finnhub: raw, region: 'EU' }];
   }
 
   return [
-    { display: raw, eodhd: `${raw}.US`, finnhub: raw, fmp: raw },
-    { display: raw, eodhd: `${raw}.LSE`, finnhub: `${raw}.L`, fmp: `${raw}.L` },
-    { display: raw, eodhd: `${raw}.XETRA`, finnhub: `${raw}.DE`, fmp: `${raw}.DE` },
-    { display: raw, eodhd: `${raw}.MC`, finnhub: `${raw}.MC`, fmp: `${raw}.MC` }
+    { display: raw, eodhd: `${raw}.US`, finnhub: raw, region: 'US' },
+    { display: raw, eodhd: `${raw}.LSE`, finnhub: `${raw}.L`, region: 'UK' },
+    { display: raw, eodhd: `${raw}.XETRA`, finnhub: `${raw}.DE`, region: 'EU' },
+    { display: raw, eodhd: `${raw}.MC`, finnhub: `${raw}.MC`, region: 'EU' }
   ];
 }
 
@@ -196,88 +193,13 @@ function mapExchangeToFinnhub_(exchange, ticker) {
   return ticker;
 }
 
-function mapExchangeToFmp_(exchange, ticker) {
+function mapExchangeToRegion_(exchange) {
   const ex = String(exchange).toUpperCase();
 
-  if (ex === 'LON' || ex === 'LSE' || ex === 'XLON') return `${ticker}.L`;
-  if (ex === 'ETR' || ex === 'XETR') return `${ticker}.DE`;
-  if (ex === 'BME' || ex === 'XMAD') return `${ticker}.MC`;
-  if (ex === 'NASDAQ' || ex === 'NYSE') return ticker;
+  if (ex === 'NASDAQ' || ex === 'NYSE') return 'US';
+  if (ex === 'LON' || ex === 'LSE' || ex === 'XLON') return 'UK';
 
-  return ticker;
-}
-
-async function tryEodhd_(candidate, userTicker) {
-  if (!EODHD_API_KEY) {
-    console.error('Missing EODHD_API_KEY');
-    return null;
-  }
-
-  if (!candidate.eodhd) return null;
-
-  try {
-    const history = await fetchEodhdHistory_(candidate.eodhd);
-
-    console.log(`EODHD history for ${candidate.eodhd}: ${history.length} rows`);
-
-    if (!history || history.length < 5) return null;
-
-    const latest = history[history.length - 1];
-    const price = latest.close;
-    const performance = buildPerformanceFromHistory_(history, price);
-
-    const fmpProfile = await safeFmpProfile_(candidate.fmp);
-    const fmpRating = await safeFmpRating_(candidate.fmp);
-
-    console.log(`FMP profile for ${candidate.fmp}: ${JSON.stringify(fmpProfile).slice(0, 700)}`);
-    console.log(`FMP rating for ${candidate.fmp}: ${JSON.stringify(fmpRating).slice(0, 700)}`);
-
-    const name = fmpProfile.companyName || candidate.display || userTicker;
-    const currency = fmpProfile.currency || '';
-    const marketCap = fmpProfile.mktCap ? formatLargeNumber_(fmpProfile.mktCap, currency) : 'N/A';
-    const analystText = buildFmpRatingText_(fmpRating);
-
-    return {
-      source: 'EODHD EOD + FMP',
-      symbol: candidate.eodhd,
-      name,
-      price,
-      currency,
-      marketCap,
-      performance,
-      analystText
-    };
-  } catch (error) {
-    console.error(`EODHD candidate failed: ${candidate.eodhd}`);
-    console.error(error);
-    return null;
-  }
-}
-
-async function fetchEodhdHistory_(symbol) {
-  const to = new Date();
-  const from = new Date();
-  from.setDate(from.getDate() - 430);
-
-  const fromText = from.toISOString().slice(0, 10);
-  const toText = to.toISOString().slice(0, 10);
-
-  const url =
-    `https://eodhd.com/api/eod/${encodeURIComponent(symbol)}?from=${fromText}&to=${toText}&period=d&api_token=${encodeURIComponent(EODHD_API_KEY)}&fmt=json`;
-
-  const data = await fetchJson(url);
-
-  console.log(`EODHD raw response for ${symbol}: ${JSON.stringify(data).slice(0, 500)}`);
-
-  if (!Array.isArray(data)) return [];
-
-  return data
-    .map(row => ({
-      date: row.date,
-      close: Number(row.adjusted_close || row.close)
-    }))
-    .filter(row => row.date && isFinite(row.close) && row.close > 0)
-    .sort((a, b) => new Date(a.date) - new Date(b.date));
+  return 'EU';
 }
 
 async function tryFinnhub_(candidate, userTicker) {
@@ -313,40 +235,59 @@ async function tryFinnhub_(candidate, userTicker) {
   }
 }
 
-async function safeFmpProfile_(symbol) {
-  if (!symbol || !FMP_API_KEY) return {};
+async function tryEodhd_(candidate, userTicker) {
+  if (!EODHD_API_KEY || !candidate.eodhd) return null;
 
   try {
-    const data = await fetchJson(
-      `https://financialmodelingprep.com/api/v3/profile/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(FMP_API_KEY)}`
-    );
+    const history = await fetchEodhdHistory_(candidate.eodhd);
 
-    if (Array.isArray(data) && data.length > 0) return data[0];
+    console.log(`EODHD history for ${candidate.eodhd}: ${history.length} rows`);
 
-    return {};
+    if (!history || history.length < 5) return null;
+
+    const latest = history[history.length - 1];
+    const price = latest.close;
+    const performance = buildPerformanceFromHistory_(history, price);
+
+    return {
+      source: 'EODHD EOD',
+      symbol: candidate.eodhd,
+      name: candidate.display || userTicker,
+      price,
+      currency: '',
+      marketCap: 'N/A',
+      performance,
+      analystText: 'No analyst data available'
+    };
   } catch (error) {
-    console.error(`FMP profile failed for ${symbol}`);
+    console.error(`EODHD candidate failed: ${candidate.eodhd}`);
     console.error(error);
-    return {};
+    return null;
   }
 }
 
-async function safeFmpRating_(symbol) {
-  if (!symbol || !FMP_API_KEY) return {};
+async function fetchEodhdHistory_(symbol) {
+  const to = new Date();
+  const from = new Date();
+  from.setDate(from.getDate() - 430);
 
-  try {
-    const data = await fetchJson(
-      `https://financialmodelingprep.com/api/v3/rating/${encodeURIComponent(symbol)}?apikey=${encodeURIComponent(FMP_API_KEY)}`
-    );
+  const fromText = from.toISOString().slice(0, 10);
+  const toText = to.toISOString().slice(0, 10);
 
-    if (Array.isArray(data) && data.length > 0) return data[0];
+  const url =
+    `https://eodhd.com/api/eod/${encodeURIComponent(symbol)}?from=${fromText}&to=${toText}&period=d&api_token=${encodeURIComponent(EODHD_API_KEY)}&fmt=json`;
 
-    return {};
-  } catch (error) {
-    console.error(`FMP rating failed for ${symbol}`);
-    console.error(error);
-    return {};
-  }
+  const data = await fetchJson(url);
+
+  if (!Array.isArray(data)) return [];
+
+  return data
+    .map(row => ({
+      date: row.date,
+      close: Number(row.adjusted_close || row.close)
+    }))
+    .filter(row => row.date && isFinite(row.close) && row.close > 0)
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
 }
 
 function buildPerformanceFromHistory_(history, currentPrice) {
@@ -392,26 +333,6 @@ function emptyPerformance_() {
   };
 }
 
-function buildFmpRatingText_(rating) {
-  if (!rating || Object.keys(rating).length === 0) {
-    return 'No analyst/rating data available';
-  }
-
-  const recommendation = rating.ratingRecommendation || rating.rating || 'N/A';
-  const score = rating.ratingScore !== undefined ? rating.ratingScore : 'N/A';
-
-  return (
-    `Rating: ${recommendation}\n` +
-    `Score: ${score}/5\n` +
-    `DCF Score: ${rating.ratingDetailsDCFScore ?? 'N/A'}\n` +
-    `ROE Score: ${rating.ratingDetailsROEScore ?? 'N/A'}\n` +
-    `ROA Score: ${rating.ratingDetailsROAScore ?? 'N/A'}\n` +
-    `DE Score: ${rating.ratingDetailsDEScore ?? 'N/A'}\n` +
-    `PE Score: ${rating.ratingDetailsPEScore ?? 'N/A'}\n` +
-    `PB Score: ${rating.ratingDetailsPBScore ?? 'N/A'}`
-  );
-}
-
 function buildAnalystText_(analyst) {
   if (!analyst) return 'No analyst data available';
 
@@ -423,9 +344,7 @@ function buildAnalystText_(analyst) {
 
   const total = strongBuy + buy + hold + sell + strongSell;
 
-  if (total === 0) {
-    return 'No analyst data available';
-  }
+  if (total === 0) return 'No analyst data available';
 
   const view = getAnalystView_(strongBuy, buy, hold, sell, strongSell);
 
@@ -508,20 +427,12 @@ function formatMarketCap_(marketCapMillions) {
   if (!value) return 'N/A';
 
   const absoluteValue = value * 1000000;
-  return formatLargeNumber_(absoluteValue, 'USD');
-}
 
-function formatLargeNumber_(value, currency) {
-  const n = Number(value);
-  if (!isFinite(n) || n <= 0) return 'N/A';
+  if (absoluteValue >= 1000000000000) return `$${(absoluteValue / 1000000000000).toFixed(2)}tn`;
+  if (absoluteValue >= 1000000000) return `$${(absoluteValue / 1000000000).toFixed(2)}bn`;
+  if (absoluteValue >= 1000000) return `$${(absoluteValue / 1000000).toFixed(2)}m`;
 
-  const prefix = currency ? `${currency} ` : '';
-
-  if (n >= 1000000000000) return `${prefix}${(n / 1000000000000).toFixed(2)}tn`;
-  if (n >= 1000000000) return `${prefix}${(n / 1000000000).toFixed(2)}bn`;
-  if (n >= 1000000) return `${prefix}${(n / 1000000).toFixed(2)}m`;
-
-  return `${prefix}${n.toLocaleString()}`;
+  return `$${absoluteValue.toLocaleString()}`;
 }
 
 async function fetchJson(url) {
