@@ -95,6 +95,9 @@ client.on('interactionCreate', async interaction => {
 async function resolveTicker_(userTicker) {
   const candidates = buildTickerCandidates_(userTicker);
 
+  console.log(`--- DEBUG FOR ${userTicker} ---`);
+  console.log(`Candidates: ${JSON.stringify(candidates)}`);
+
   for (const symbol of candidates) {
     try {
       const quote = await fetchJson(
@@ -113,6 +116,12 @@ async function resolveTicker_(userTicker) {
         `https://finnhub.io/api/v1/stock/metric?symbol=${encodeURIComponent(symbol)}&metric=all&token=${encodeURIComponent(FINNHUB_API_KEY)}`
       );
 
+      console.log(`Candidate checked: ${symbol}`);
+      console.log(`Quote: ${JSON.stringify(quote)}`);
+      console.log(`Profile: ${JSON.stringify(profile)}`);
+      console.log(`Recommendation count: ${Array.isArray(recommendation) ? recommendation.length : 'not array'}`);
+      console.log(`Metrics keys: ${metrics && metrics.metric ? Object.keys(metrics.metric).slice(0, 20).join(', ') : 'none'}`);
+
       const hasUsefulData =
         (quote && quote.c && Number(quote.c) > 0) ||
         (profile && profile.name) ||
@@ -128,6 +137,7 @@ async function resolveTicker_(userTicker) {
     }
   }
 
+  console.log(`No useful data found for ${userTicker}`);
   return null;
 }
 
