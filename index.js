@@ -31,6 +31,9 @@ const commands = [
 client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
 
+  console.log(`FINNHUB_API_KEY present: ${Boolean(FINNHUB_API_KEY)}`);
+  console.log(`EODHD_API_KEY present: ${Boolean(EODHD_API_KEY)}`);
+
   try {
     const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
     await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
@@ -108,21 +111,9 @@ function buildTickerCandidates_(userTicker) {
 
   if (manualTickerMap[raw]) {
     return [
-      {
-        display: raw,
-        eodhd: manualTickerMap[raw].eodhd,
-        finnhub: manualTickerMap[raw].finnhub
-      },
-      {
-        display: raw,
-        eodhd: `${raw}.LSE`,
-        finnhub: `${raw}.L`
-      },
-      {
-        display: raw,
-        eodhd: `${raw}.US`,
-        finnhub: raw
-      }
+      { display: raw, eodhd: manualTickerMap[raw].eodhd, finnhub: manualTickerMap[raw].finnhub },
+      { display: raw, eodhd: `${raw}.LSE`, finnhub: `${raw}.L` },
+      { display: raw, eodhd: `${raw}.US`, finnhub: raw }
     ];
   }
 
@@ -135,11 +126,7 @@ function buildTickerCandidates_(userTicker) {
         eodhd: mapExchangeToEodhd_(exchange, ticker),
         finnhub: mapExchangeToFinnhub_(exchange, ticker)
       },
-      {
-        display: ticker,
-        eodhd: `${ticker}.US`,
-        finnhub: ticker
-      }
+      { display: ticker, eodhd: `${ticker}.US`, finnhub: ticker }
     ];
   }
 
@@ -189,37 +176,34 @@ function mapExchangeToFinnhub_(exchange, ticker) {
 }
 
 async function tryEodhd_(candidate, userTicker) {
-  if (!EODHD_API_KEY || !candidate.eodhd) return null;
+  if (!EODHD_API_KEY) {
+    console.error('Missing EODHD_API_KEY');
+    return null;
+  }
+
+  if (!candidate.eodhd) return null;
 
   try {
-    const quote = await fetchJson(
-      `https://eodhd.com/api/real-time/${encodeURIComponent(candidate.eodhd)}?api_token=${encodeURIComponent(EODHD_API_KEY)}&fmt=json`
-    );
-
-    console.log(`EODHD quote for ${candidate.eodhd}: ${JSON.stringify(quote).slice(0, 700)}`);
-
-    if (!quote || quote.error || quote.code === 404 || quote.code === 403) return null;
-
-    const price = firstNumber_([
-      quote.close,
-      quote.price,
-      quote.previousClose
-    ]);
-
-    if (!price) return null;
-
     const history = await fetchEodhdHistory_(candidate.eodhd);
+
+    console.log(`EODHD history for ${candidate.eodhd}: ${history.length} rows`);
+
+    if (!history || history.length < 5) return null;
+
+    const latest = history[history.length - 1];
+    const price = latest.close;
+
     const performance = buildPerformanceFromHistory_(history, price);
 
     const profile = await safeFinnhubProfile_(candidate.finnhub);
     const recommendation = await safeFinnhubRecommendation_(candidate.finnhub);
 
     return {
-      source: 'EODHD',
+      source: 'EODHD EOD',
       symbol: candidate.eodhd,
-      name: profile.name || quote.name || candidate.display || userTicker,
+      name: profile.name || candidate.display || userTicker,
       price,
-      currency: quote.currency || profile.currency || '',
+      currency: profile.currency || '',
       marketCap: profile.marketCapitalization ? formatMarketCap_(profile.marketCapitalization) : 'N/A',
       performance,
       recommendation
@@ -239,9 +223,12 @@ async function fetchEodhdHistory_(symbol) {
   const fromText = from.toISOString().slice(0, 10);
   const toText = to.toISOString().slice(0, 10);
 
-  const data = await fetchJson(
-    `https://eodhd.com/api/eod/${encodeURIComponent(symbol)}?from=${fromText}&to=${toText}&period=d&api_token=${encodeURIComponent(EODHD_API_KEY)}&fmt=json`
-  );
+  const url =
+    `https://eodhd.com/api/eod/${encodeURIComponent(symbol)}?from=${fromText}&to=${toText}&period=d&api_token=${encodeURIComponent(EODHD_API_KEY)}&fmt=json`;
+
+  const data = await fetchJson(url);
+
+  console.log(`EODHD raw response for ${symbol}: ${JSON.stringify(data).slice(0, 500)}`);
 
   if (!Array.isArray(data)) return [];
 
@@ -288,9 +275,7 @@ async function tryFinnhub_(candidate, userTicker) {
 }
 
 function buildPerformanceFromHistory_(history, currentPrice) {
-  if (!history || history.length < 5 || !currentPrice) {
-    return emptyPerformance_();
-  }
+  if (!history || history.length < 5 || !currentPrice) return emptyPerformance_();
 
   const prices = history.map(row => row.close);
 
@@ -398,15 +383,6 @@ async function safeFinnhubMetrics_(symbol) {
   }
 }
 
-function firstNumber_(values) {
-  for (const value of values) {
-    const n = Number(value);
-    if (isFinite(n) && n > 0) return n;
-  }
-
-  return null;
-}
-
 function firstAvailable_(object, keys) {
   for (const key of keys) {
     if (object[key] !== undefined && object[key] !== null && object[key] !== '') {
@@ -433,14 +409,10 @@ function formatMarketCap_(marketCapMillions) {
 
 async function fetchJson(url) {
   const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0'
-    }
+    headers: { 'User-Agent': 'Mozilla/5.0' }
   });
 
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-  }
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
 
   return await response.json();
 }
