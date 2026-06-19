@@ -9,7 +9,7 @@ const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const manualTickerMap = {
-  AEDAS: { symbol: 'AEDAS', micCode: null, finnhub: 'AEDAS.MC' },
+  AEDAS: { symbol: 'AEDAS', micCode: 'XMAD', finnhub: 'AEDAS.MC' },
   HWG: { symbol: 'HWG', micCode: 'XLON', finnhub: 'HWG.L' },
   NDX1: { symbol: 'NDX1', micCode: 'XETR', finnhub: 'NDX1.DE' },
   REL: { symbol: 'REL', micCode: 'XLON', finnhub: 'REL.L' },
@@ -53,7 +53,7 @@ client.on('interactionCreate', async interaction => {
     const resolved = await resolveTicker_(userTicker);
 
     if (!resolved) {
-      await interaction.editReply(`Could not find data for ${userTicker}. Try an exchange format like REL.L, SGRO.L, NDX1.DE, LON:REL, or NASDAQ:PLTR.`);
+      await interaction.editReply(`Could not find reliable data for ${userTicker}. Try the exact exchange format, e.g. REL.L, SGRO.L, NDX1.DE, LON:REL, or NASDAQ:PLTR.`);
       return;
     }
 
@@ -139,7 +139,10 @@ async function buildTwelveDataCandidates_(userTicker, baseCandidates) {
   const candidates = [...baseCandidates];
 
   try {
-    const searchSymbol = stripExchangePrefix_(userTicker);
+    const searchSymbol = stripExchangePrefix_(userTicker)
+      .replace(/\.(L|DE|MC|HK)$/i, '')
+      .toUpperCase();
+
     const searchUrl =
       `https://api.twelvedata.com/symbol_search?symbol=${encodeURIComponent(searchSymbol)}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`;
 
@@ -152,8 +155,14 @@ async function buildTwelveDataCandidates_(userTicker, baseCandidates) {
     results.forEach(item => {
       if (!item || !item.symbol) return;
 
+      const foundSymbol = String(item.symbol).toUpperCase();
+
+      if (foundSymbol !== searchSymbol) {
+        return;
+      }
+
       candidates.push({
-        symbol: String(item.symbol).toUpperCase(),
+        symbol: foundSymbol,
         micCode: item.mic_code || null,
         exchange: item.exchange || null,
         finnhub: mapFinnhubSymbolFromSearch_(item)
@@ -168,7 +177,9 @@ async function buildTwelveDataCandidates_(userTicker, baseCandidates) {
 }
 
 function rankCandidates_(candidates, userTicker) {
-  const raw = stripExchangePrefix_(userTicker).replace(/\.(L|DE|MC|HK)$/i, '').toUpperCase();
+  const raw = stripExchangePrefix_(userTicker)
+    .replace(/\.(L|DE|MC|HK)$/i, '')
+    .toUpperCase();
 
   return candidates.sort((a, b) => {
     const aScore = scoreCandidate_(a, raw);
@@ -180,11 +191,11 @@ function rankCandidates_(candidates, userTicker) {
 function scoreCandidate_(candidate, raw) {
   let score = 0;
 
-  if (candidate.symbol === raw) score += 10;
-  if (candidate.micCode === 'XLON') score += 5;
-  if (candidate.micCode === 'XETR') score += 4;
-  if (candidate.micCode === 'BMEX' || candidate.micCode === 'XMAD') score += 4;
-  if (candidate.micCode === 'XNAS' || candidate.micCode === 'XNYS') score += 3;
+  if (candidate.symbol === raw) score += 20;
+  if (candidate.micCode === 'XLON') score += 10;
+  if (candidate.micCode === 'XETR') score += 8;
+  if (candidate.micCode === 'XMAD' || candidate.micCode === 'BMEX') score += 8;
+  if (candidate.micCode === 'XNAS' || candidate.micCode === 'XNYS') score += 6;
 
   return score;
 }
@@ -196,12 +207,28 @@ async function tryTwelveData_(candidate, userTicker) {
   }
 
   try {
+    const expectedSymbol = stripExchangePrefix_(userTicker)
+      .replace(/\.(L|DE|MC|HK)$/i, '')
+      .toUpperCase();
+
+    if (candidate.symbol !== expectedSymbol) {
+      console.log(`Rejected candidate ${candidate.symbol} because it does not exactly match ${expectedSymbol}`);
+      return null;
+    }
+
     const quoteUrl = buildTwelveDataUrl_('quote', candidate);
     const quoteRaw = await fetchJson(quoteUrl);
 
     console.log(`Twelve quote for ${JSON.stringify(candidate)}: ${JSON.stringify(quoteRaw).slice(0, 700)}`);
 
     if (isTwelveDataError_(quoteRaw)) return null;
+
+    const quoteSymbol = String(quoteRaw.symbol || candidate.symbol).toUpperCase();
+
+    if (quoteSymbol !== expectedSymbol) {
+      console.log(`Rejected Twelve quote symbol ${quoteSymbol}; expected ${expectedSymbol}`);
+      return null;
+    }
 
     const price = firstNumber_([
       quoteRaw.close,
@@ -334,8 +361,8 @@ function buildTickerCandidates_(userTicker) {
   if (raw.endsWith('.MC')) {
     const ticker = raw.replace('.MC', '');
     return uniqueCandidates_([
-      { symbol: ticker, micCode: 'BMEX', exchange: null, finnhub: raw },
       { symbol: ticker, micCode: 'XMAD', exchange: null, finnhub: raw },
+      { symbol: ticker, micCode: 'BMEX', exchange: null, finnhub: raw },
       { symbol: raw, micCode: null, exchange: null, finnhub: raw }
     ]);
   }
@@ -352,8 +379,8 @@ function buildTickerCandidates_(userTicker) {
     { symbol: raw, micCode: null, exchange: null, finnhub: raw },
     { symbol: raw, micCode: 'XLON', exchange: null, finnhub: `${raw}.L` },
     { symbol: raw, micCode: 'XETR', exchange: null, finnhub: `${raw}.DE` },
-    { symbol: raw, micCode: 'BMEX', exchange: null, finnhub: `${raw}.MC` },
     { symbol: raw, micCode: 'XMAD', exchange: null, finnhub: `${raw}.MC` },
+    { symbol: raw, micCode: 'BMEX', exchange: null, finnhub: `${raw}.MC` },
     { symbol: raw, micCode: 'XHKG', exchange: null, finnhub: `${raw}.HK` }
   ]);
 }
@@ -391,8 +418,9 @@ function mapExchangeToMicCode_(exchange) {
     XLON: 'XLON',
     ETR: 'XETR',
     XETR: 'XETR',
-    BME: 'BMEX',
+    BME: 'XMAD',
     BMEX: 'BMEX',
+    XMAD: 'XMAD',
     HKG: 'XHKG',
     HKEX: 'XHKG',
     NASDAQ: null,
@@ -405,7 +433,7 @@ function mapExchangeToMicCode_(exchange) {
 function mapFinnhubSymbol_(exchange, ticker) {
   if (exchange === 'LON' || exchange === 'LSE' || exchange === 'XLON') return `${ticker}.L`;
   if (exchange === 'ETR' || exchange === 'XETR') return `${ticker}.DE`;
-  if (exchange === 'BME' || exchange === 'BMEX') return `${ticker}.MC`;
+  if (exchange === 'BME' || exchange === 'BMEX' || exchange === 'XMAD') return `${ticker}.MC`;
   if (exchange === 'HKG' || exchange === 'HKEX') return `${ticker}.HK`;
   return ticker;
 }
