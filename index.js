@@ -7,12 +7,20 @@ const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
+const manualTickerMap = {
+  AEDAS: 'AEDAS.MC',
+  HWG: 'HWG.L',
+  NDX1: 'NDX1.DE',
+  REL: 'REL.L',
+  SGRO: 'SGRO.L'
+};
+
 const commands = [
   new SlashCommandBuilder()
     .setName('stock')
     .setDescription('Get a quick stock snapshot')
     .addStringOption(option =>
-      option.setName('ticker').setDescription('Ticker symbol, e.g. PLTR').setRequired(true)
+      option.setName('ticker').setDescription('Ticker symbol, e.g. PLTR, REL, SGRO').setRequired(true)
     )
 ].map(command => command.toJSON());
 
@@ -33,29 +41,22 @@ client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName !== 'stock') return;
 
-  const ticker = interaction.options.getString('ticker').toUpperCase();
+  const userTicker = interaction.options.getString('ticker').toUpperCase().trim();
 
   await interaction.deferReply();
 
   try {
-    const quote = await fetchJson(
-      `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`
-    );
+    const resolved = await resolveTicker_(userTicker);
 
-    const profile = await fetchJson(
-      `https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`
-    );
+    if (!resolved) {
+      await interaction.editReply(`Could not find data for ${userTicker}. Try the exchange version, e.g. REL.L, SGRO.L, NDX1.DE.`);
+      return;
+    }
 
-    const recommendation = await fetchJson(
-      `https://finnhub.io/api/v1/stock/recommendation?symbol=${encodeURIComponent(ticker)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`
-    );
-
-    const metrics = await fetchJson(
-      `https://finnhub.io/api/v1/stock/metric?symbol=${encodeURIComponent(ticker)}&metric=all&token=${encodeURIComponent(FINNHUB_API_KEY)}`
-    );
+    const { symbol, quote, profile, recommendation, metrics } = resolved;
 
     const currentPrice = quote && quote.c ? Number(quote.c) : null;
-    const companyName = profile && profile.name ? profile.name : ticker;
+    const companyName = profile && profile.name ? profile.name : userTicker;
     const currency = profile && profile.currency ? profile.currency : '';
     const marketCap = profile && profile.marketCapitalization
       ? formatMarketCap_(profile.marketCapitalization)
@@ -71,7 +72,8 @@ client.on('interactionCreate', async interaction => {
 
     const message =
       `🔍 **STOCK SNAPSHOT**\n\n` +
-      `**${companyName} (${ticker})**\n\n` +
+      `**${companyName} (${symbol})**\n` +
+      `Requested: ${userTicker}\n\n` +
       `💰 Current Price: ${currentPrice ? `${currency} ${currentPrice}` : 'N/A'}\n` +
       `🏢 Market Cap: ${marketCap}\n\n` +
       `📊 **Performance**\n` +
@@ -86,9 +88,82 @@ client.on('interactionCreate', async interaction => {
   } catch (error) {
     console.error('Stock lookup failed:');
     console.error(error);
-    await interaction.editReply(`Could not fetch data for ${ticker}.`);
+    await interaction.editReply(`Could not fetch data for ${userTicker}.`);
   }
 });
+
+async function resolveTicker_(userTicker) {
+  const candidates = buildTickerCandidates_(userTicker);
+
+  for (const symbol of candidates) {
+    try {
+      const quote = await fetchJson(
+        `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`
+      );
+
+      const profile = await fetchJson(
+        `https://finnhub.io/api/v1/stock/profile2?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`
+      );
+
+      const recommendation = await fetchJson(
+        `https://finnhub.io/api/v1/stock/recommendation?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(FINNHUB_API_KEY)}`
+      );
+
+      const metrics = await fetchJson(
+        `https://finnhub.io/api/v1/stock/metric?symbol=${encodeURIComponent(symbol)}&metric=all&token=${encodeURIComponent(FINNHUB_API_KEY)}`
+      );
+
+      const hasUsefulData =
+        (quote && quote.c && Number(quote.c) > 0) ||
+        (profile && profile.name) ||
+        (metrics && metrics.metric && Object.keys(metrics.metric).length > 0);
+
+      if (hasUsefulData) {
+        console.log(`Resolved ${userTicker} to ${symbol}`);
+        return { symbol, quote, profile, recommendation, metrics };
+      }
+    } catch (error) {
+      console.error(`Ticker candidate failed: ${symbol}`);
+      console.error(error);
+    }
+  }
+
+  return null;
+}
+
+function buildTickerCandidates_(userTicker) {
+  const raw = String(userTicker).trim().toUpperCase();
+
+  if (manualTickerMap[raw]) {
+    return [manualTickerMap[raw], raw];
+  }
+
+  if (raw.includes(':')) {
+    const [exchange, ticker] = raw.split(':');
+
+    const mapped = [];
+
+    if (exchange === 'LON') mapped.push(`${ticker}.L`);
+    if (exchange === 'ETR') mapped.push(`${ticker}.DE`);
+    if (exchange === 'BME') mapped.push(`${ticker}.MC`);
+    if (exchange === 'HKG') mapped.push(`${ticker}.HK`);
+    if (exchange === 'NASDAQ') mapped.push(ticker);
+    if (exchange === 'NYSE') mapped.push(ticker);
+
+    mapped.push(ticker);
+    mapped.push(raw);
+
+    return [...new Set(mapped)];
+  }
+
+  return [
+    raw,
+    `${raw}.L`,
+    `${raw}.DE`,
+    `${raw}.MC`,
+    `${raw}.HK`
+  ];
+}
 
 function buildPerformanceText_(metrics) {
   const metric = metrics && metrics.metric ? metrics.metric : {};
