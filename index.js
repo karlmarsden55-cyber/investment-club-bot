@@ -623,4 +623,30 @@ async function fetchJson(url) {
     headers: { 'User-Agent': 'Mozilla/5.0' }
   });
 
-  if (!response.ok) throw new Error(`HTTP ${response.status}:
+  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+
+  return await response.json();
+}
+
+async function fetchJsonOpenAI_(url, body) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI HTTP ${response.status}: ${text}`);
+  }
+
+  return await response.json();
+}
+
+client.login(DISCORD_TOKEN).catch(error => {
+  console.error('Bot login failed:');
+  console.error(error);
+});
