@@ -5,6 +5,7 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const FINNHUB_API_KEY = process.env.FINNHUB_API_KEY;
 const EODHD_API_KEY = process.env.EODHD_API_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -22,10 +23,14 @@ const commands = [
     .setName('stock')
     .setDescription('Get a quick stock snapshot')
     .addStringOption(option =>
-      option
-        .setName('ticker')
-        .setDescription('Ticker symbol, e.g. PLTR, REL, SGRO, CWR, NDX1')
-        .setRequired(true)
+      option.setName('ticker').setDescription('Ticker symbol, e.g. PLTR, CWR, REL').setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('research')
+    .setDescription('Get an AI research brief for a stock')
+    .addStringOption(option =>
+      option.setName('ticker').setDescription('Ticker symbol, e.g. PLTR, CWR, REL').setRequired(true)
     )
 ].map(command => command.toJSON());
 
@@ -33,6 +38,7 @@ client.once('clientReady', async () => {
   console.log(`Logged in as ${client.user.tag}`);
   console.log(`FINNHUB_API_KEY present: ${Boolean(FINNHUB_API_KEY)}`);
   console.log(`EODHD_API_KEY present: ${Boolean(EODHD_API_KEY)}`);
+  console.log(`OPENAI_API_KEY present: ${Boolean(OPENAI_API_KEY)}`);
 
   try {
     const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
@@ -46,42 +52,63 @@ client.once('clientReady', async () => {
 
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
-  if (interaction.commandName !== 'stock') return;
 
+  const command = interaction.commandName;
   const userTicker = interaction.options.getString('ticker').toUpperCase().trim();
 
   await interaction.deferReply();
 
   try {
-    const resolved = await resolveTicker_(userTicker);
+    if (command === 'stock') {
+      const resolved = await resolveTicker_(userTicker);
 
-    if (!resolved) {
-      await interaction.editReply(`Could not find reliable data for ${userTicker}.`);
+      if (!resolved) {
+        await interaction.editReply(`Could not find reliable data for ${userTicker}.`);
+        return;
+      }
+
+      await interaction.editReply(buildStockMessage_(resolved, userTicker));
       return;
     }
 
-    const message =
-      `🔍 **STOCK SNAPSHOT**\n\n` +
-      `**${resolved.name} (${resolved.symbol})**\n` +
-      `Requested: ${userTicker}\n` +
-      `Source: ${resolved.source}\n\n` +
-      `💰 Current Price: ${resolved.currency ? `${resolved.currency} ` : ''}${resolved.price || 'N/A'}\n` +
-      `🏢 Market Cap: ${resolved.marketCap || 'N/A'}\n\n` +
-      `📊 **Performance**\n` +
-      `4W: ${resolved.performance.week4}\n` +
-      `13W: ${resolved.performance.week13}\n` +
-      `26W: ${resolved.performance.week26}\n` +
-      `52W: ${resolved.performance.week52}\n\n` +
-      `📈 **Analyst View**\n` +
-      `${resolved.analystText || 'No analyst data available'}`;
+    if (command === 'research') {
+      const resolved = await resolveTicker_(userTicker);
 
-    await interaction.editReply(message);
+      if (!resolved) {
+        await interaction.editReply(`Could not find reliable data for ${userTicker}.`);
+        return;
+      }
+
+      const news = await fetchNews_(resolved);
+      const report = await generateResearchReport_(resolved, userTicker, news);
+
+      await interaction.editReply(report);
+      return;
+    }
   } catch (error) {
-    console.error('Stock lookup failed:');
+    console.error(`${command} lookup failed:`);
     console.error(error);
     await interaction.editReply(`Could not fetch data for ${userTicker}.`);
   }
 });
+
+function buildStockMessage_(resolved, userTicker) {
+  return (
+    `🔍 **STOCK SNAPSHOT**\n\n` +
+    `**${resolved.name} (${resolved.symbol})**\n` +
+    `Requested: ${userTicker}\n` +
+    `Source: ${resolved.source}\n\n` +
+    `💰 Current Price: ${resolved.currency ? `${resolved.currency} ` : ''}${resolved.price || 'N/A'}\n` +
+    `🏢 Market Cap: ${resolved.marketCap || 'N/A'}\n\n` +
+    `📊 **Performance**\n` +
+    `4W: ${resolved.performance.week4}\n` +
+    `13W: ${resolved.performance.week13}\n` +
+    `26W: ${resolved.performance.week26}\n` +
+    `52W: ${resolved.performance.week52}\n\n` +
+    `📈 **Analyst View**\n` +
+    `${resolved.analystText || 'No analyst data available'}`
+  );
+}
 
 async function resolveTicker_(userTicker) {
   const candidates = buildTickerCandidates_(userTicker);
@@ -221,12 +248,15 @@ async function tryFinnhub_(candidate, userTicker) {
     return {
       source: 'Finnhub',
       symbol: candidate.finnhub,
+      eodhdSymbol: candidate.eodhd,
+      finnhubSymbol: candidate.finnhub,
       name: profile.name || candidate.display || userTicker,
       price,
       currency: profile.currency || '',
       marketCap: profile.marketCapitalization ? formatMarketCap_(profile.marketCapitalization) : 'N/A',
       performance: buildPerformanceFromFinnhubMetrics_(metrics),
-      analystText: buildAnalystText_(recommendation && recommendation[0] ? recommendation[0] : null)
+      analystText: buildAnalystText_(recommendation && recommendation[0] ? recommendation[0] : null),
+      region: candidate.region
     };
   } catch (error) {
     console.error(`Finnhub candidate failed: ${candidate.finnhub}`);
@@ -252,12 +282,15 @@ async function tryEodhd_(candidate, userTicker) {
     return {
       source: 'EODHD EOD',
       symbol: candidate.eodhd,
+      eodhdSymbol: candidate.eodhd,
+      finnhubSymbol: candidate.finnhub,
       name: candidate.display || userTicker,
       price,
       currency: '',
       marketCap: 'N/A',
       performance,
-      analystText: 'No analyst data available'
+      analystText: 'No analyst data available',
+      region: candidate.region
     };
   } catch (error) {
     console.error(`EODHD candidate failed: ${candidate.eodhd}`);
@@ -288,6 +321,127 @@ async function fetchEodhdHistory_(symbol) {
     }))
     .filter(row => row.date && isFinite(row.close) && row.close > 0)
     .sort((a, b) => new Date(a.date) - new Date(b.date));
+}
+
+async function fetchNews_(resolved) {
+  const items = [];
+
+  if (resolved.finnhubSymbol && FINNHUB_API_KEY && resolved.region === 'US') {
+    try {
+      const to = new Date();
+      const from = new Date();
+      from.setDate(from.getDate() - 45);
+
+      const fromText = from.toISOString().slice(0, 10);
+      const toText = to.toISOString().slice(0, 10);
+
+      const data = await fetchJson(
+        `https://finnhub.io/api/v1/company-news?symbol=${encodeURIComponent(resolved.finnhubSymbol)}&from=${fromText}&to=${toText}&token=${encodeURIComponent(FINNHUB_API_KEY)}`
+      );
+
+      if (Array.isArray(data)) {
+        data.slice(0, 10).forEach(article => {
+          items.push({
+            date: article.datetime ? new Date(article.datetime * 1000).toISOString().slice(0, 10) : '',
+            headline: article.headline || '',
+            summary: article.summary || '',
+            source: article.source || '',
+            url: article.url || ''
+          });
+        });
+      }
+    } catch (error) {
+      console.error('Finnhub news failed:');
+      console.error(error);
+    }
+  }
+
+  if (resolved.eodhdSymbol && EODHD_API_KEY) {
+    try {
+      const data = await fetchJson(
+        `https://eodhd.com/api/news?s=${encodeURIComponent(resolved.eodhdSymbol)}&offset=0&limit=10&api_token=${encodeURIComponent(EODHD_API_KEY)}&fmt=json`
+      );
+
+      if (Array.isArray(data)) {
+        data.slice(0, 10).forEach(article => {
+          items.push({
+            date: article.date || '',
+            headline: article.title || article.headline || '',
+            summary: article.content || article.summary || '',
+            source: article.source || '',
+            url: article.link || article.url || ''
+          });
+        });
+      }
+    } catch (error) {
+      console.error('EODHD news failed:');
+      console.error(error);
+    }
+  }
+
+  return items
+    .filter(item => item.headline)
+    .slice(0, 10);
+}
+
+async function generateResearchReport_(resolved, userTicker, news) {
+  if (!OPENAI_API_KEY) {
+    return (
+      `🧠 **RESEARCH BRIEF: ${userTicker}**\n\n` +
+      `OPENAI_API_KEY is missing in Railway variables.`
+    );
+  }
+
+  const newsText = news.length
+    ? news.map((item, index) =>
+        `${index + 1}. ${item.date} | ${item.source}\nHeadline: ${item.headline}\nSummary: ${stripText_(item.summary, 300)}\nURL: ${item.url}`
+      ).join('\n\n')
+    : 'No recent news articles were available from the connected data sources.';
+
+  const prompt =
+    `You are writing a concise investment club research brief for UK retail investors.\n\n` +
+    `Do not give financial advice. Do not tell the club to buy or sell. Help them understand what may be happening and what to discuss.\n\n` +
+    `Ticker requested: ${userTicker}\n` +
+    `Resolved symbol: ${resolved.symbol}\n` +
+    `Company/name: ${resolved.name}\n` +
+    `Current price: ${resolved.price}\n` +
+    `Market cap: ${resolved.marketCap}\n` +
+    `Source: ${resolved.source}\n\n` +
+    `Performance:\n` +
+    `4W: ${resolved.performance.week4}\n` +
+    `13W: ${resolved.performance.week13}\n` +
+    `26W: ${resolved.performance.week26}\n` +
+    `52W: ${resolved.performance.week52}\n\n` +
+    `Analyst/rating data:\n${resolved.analystText}\n\n` +
+    `Recent news:\n${newsText}\n\n` +
+    `Write the report in Discord-friendly plain text using this exact structure:\n\n` +
+    `🧠 RESEARCH BRIEF: [NAME] ([SYMBOL])\n\n` +
+    `📊 Recent Performance\n` +
+    `Summarise the 4W, 13W, 26W and 52W performance in plain English.\n\n` +
+    `📰 Recent Context\n` +
+    `Use the news items if available. If no news is available, clearly say so and base the comments only on price action.\n\n` +
+    `🟢 Bull Case\n` +
+    `3 concise bullets.\n\n` +
+    `🔴 Bear Case\n` +
+    `3 concise bullets.\n\n` +
+    `🔎 What The Club Should Check Next\n` +
+    `3 practical questions the club should discuss.\n\n` +
+    `⚠️ Data Note\n` +
+    `Mention if analyst/market cap/news data was unavailable or limited.`;
+
+  const response = await fetchJsonOpenAI_('https://api.openai.com/v1/responses', {
+    model: 'gpt-4.1-mini',
+    input: prompt,
+    max_output_tokens: 900
+  });
+
+  const text = extractOpenAIText_(response);
+
+  if (!text) {
+    return `Could not generate research report for ${userTicker}.`;
+  }
+
+  return splitDiscordMessage_(text)[0];
 }
 
 function buildPerformanceFromHistory_(history, currentPrice) {
@@ -435,12 +589,67 @@ function formatMarketCap_(marketCapMillions) {
   return `$${absoluteValue.toLocaleString()}`;
 }
 
+function stripText_(text, maxLength) {
+  if (!text) return '';
+  const cleaned = String(text).replace(/\s+/g, ' ').trim();
+  return cleaned.length > maxLength ? `${cleaned.slice(0, maxLength)}...` : cleaned;
+}
+
+function extractOpenAIText_(response) {
+  if (response.output_text) return response.output_text;
+
+  if (!Array.isArray(response.output)) return '';
+
+  return response.output
+    .flatMap(item => item.content || [])
+    .filter(content => content.type === 'output_text')
+    .map(content => content.text)
+    .join('\n')
+    .trim();
+}
+
+function splitDiscordMessage_(text) {
+  const maxLength = 1900;
+  const chunks = [];
+  let remaining = text;
+
+  while (remaining.length > maxLength) {
+    let splitAt = remaining.lastIndexOf('\n', maxLength);
+    if (splitAt === -1) splitAt = maxLength;
+
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).trim();
+  }
+
+  if (remaining) chunks.push(remaining);
+
+  return chunks;
+}
+
 async function fetchJson(url) {
   const response = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0' }
   });
 
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+
+  return await response.json();
+}
+
+async function fetchJsonOpenAI_(url, body) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`OpenAI HTTP ${response.status}: ${text}`);
+  }
 
   return await response.json();
 }
