@@ -59,29 +59,21 @@ client.on('interactionCreate', async interaction => {
   await interaction.deferReply();
 
   try {
+    const resolved = await resolveTicker_(userTicker);
+
+    if (!resolved) {
+      await interaction.editReply(`Could not find reliable data for ${userTicker}.`);
+      return;
+    }
+
     if (command === 'stock') {
-      const resolved = await resolveTicker_(userTicker);
-
-      if (!resolved) {
-        await interaction.editReply(`Could not find reliable data for ${userTicker}.`);
-        return;
-      }
-
       await interaction.editReply(buildStockMessage_(resolved, userTicker));
       return;
     }
 
     if (command === 'research') {
-      const resolved = await resolveTicker_(userTicker);
-
-      if (!resolved) {
-        await interaction.editReply(`Could not find reliable data for ${userTicker}.`);
-        return;
-      }
-
       const news = await fetchNews_(resolved);
       const report = await generateResearchReport_(resolved, userTicker, news);
-
       await interaction.editReply(report);
       return;
     }
@@ -631,30 +623,4 @@ async function fetchJson(url) {
     headers: { 'User-Agent': 'Mozilla/5.0' }
   });
 
-  if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-
-  return await response.json();
-}
-
-async function fetchJsonOpenAI_(url, body) {
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify(body)
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`OpenAI HTTP ${response.status}: ${text}`);
-  }
-
-  return await response.json();
-}
-
-client.login(DISCORD_TOKEN).catch(error => {
-  console.error('Bot login failed:');
-  console.error(error);
-});
+  if (!response.ok) throw new Error(`HTTP ${response.status}:
